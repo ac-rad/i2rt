@@ -1,54 +1,68 @@
 # Minimum Gello (Teleoperation)
 
-Minimal leader-follower teleoperation example using a YAM arm and teaching handle (gello). Supports follower mode, leader mode, and local/remote visualization.
+Minimal leader-follower teleoperation using a YAM arm. Supports a teaching handle (gello) with gripper control, or a plain arm with no gripper.
 
-## Quick Start
+## Hardware Setup
+
+- **Follower arm** — YAM arm with gripper (e.g. `linear_4310`) on `can1`
+- **Leader arm** — YAM arm with teaching handle (`yam_teaching_handle`) on `can0`
+
+Make sure both CAN interfaces are up before starting:
 
 ```bash
-# Follower mode (default) — serves robot state over portal
-python examples/minimum_gello/minimum_gello.py --can-channel can0
-
-# Leader mode — reads teaching handle and drives a remote follower
-python examples/minimum_gello/minimum_gello.py --mode leader --can-channel can1
-
-# Visualizer — MuJoCo viewer mirrors live robot state
-python examples/minimum_gello/minimum_gello.py --mode visualizer_local
+sudo ip link set can0 up type can bitrate 1000000
+sudo ip link set can1 up type can bitrate 1000000
 ```
 
-## Leader-Follower Setup
+## Running Leader-Follower
 
-Run the follower on one terminal (or machine):
+Start the **follower first**, then the **leader**. The follower must be up and listening before the leader connects.
+
+**Terminal 1 — Follower:**
+```bash
+python examples/minimum_gello/minimum_gello.py \
+    --gripper linear_4310 --mode follower --can-channel can1
+```
+
+**Terminal 2 — Leader (with teaching handle + gripper control):**
+```bash
+python examples/minimum_gello/minimum_gello.py \
+    --gripper yam_teaching_handle --mode leader --can-channel can0
+```
+
+The follower will slow-move to match the leader's starting position, then teleoperation begins immediately — no button press required. Squeeze the teaching handle to control the follower gripper.
+
+## Running Without Teaching Handle
+
+If you want to run the leader arm without the teaching handle (arm joints only, no gripper control):
 
 ```bash
 python examples/minimum_gello/minimum_gello.py \
-    --gripper linear_4310 --mode follower --can-channel can0
+    --gripper no_gripper --mode leader --can-channel can0
 ```
-
-Run the leader on another:
-
-```bash
-python examples/minimum_gello/minimum_gello.py \
-    --gripper yam_teaching_handle --mode leader --can-channel can1 --bilateral-kp 0.2
-```
-
-Press **button 0** on the teaching handle to synchronize. Press again to desync.
 
 ## Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--gripper` | `yam_teaching_handle` | Gripper type (`crank_4310`, `linear_3507`, `linear_4310`, `yam_teaching_handle`, `no_gripper`) |
-| `--mode` | `follower` | Operation mode (`follower`, `leader`, `visualizer_local`, `visualizer_remote`) |
+| `--gripper` | `yam_teaching_handle` | Gripper type: `crank_4310`, `linear_3507`, `linear_4310`, `yam_teaching_handle`, `no_gripper` |
+| `--mode` | `follower` | Mode: `follower`, `leader`, `visualizer_local`, `visualizer_remote` |
 | `--can-channel` | `can0` | CAN interface name |
-| `--server-host` | `localhost` | Portal server host (for leader/remote visualizer) |
-| `--server-port` | `11333` | Portal server port |
-| `--bilateral-kp` | `0.0` | Bilateral force feedback gain (leader mode) |
-| `--ee-mass` | XML default | Override link_6 mass (kg) for gravity compensation with different handles |
+| `--server-host` | `localhost` | Host of the follower portal server (leader mode) |
+| `--server-port` | `11333` | Port of the follower portal server |
+| `--ee-mass` | XML default | Override link_6 mass (kg) for gravity compensation |
 
-## Overriding Handle Weight
+## Visualizer
 
-Older 3D-printed teaching handles may have a different mass than the default (0.258 kg). Use `--ee-mass` to compensate:
+To visualize the follower arm live in MuJoCo (while follower is running):
 
 ```bash
-python examples/minimum_gello/minimum_gello.py --ee-mass 0.350 --can-channel can0
+python examples/minimum_gello/minimum_gello.py \
+    --gripper linear_4310 --mode visualizer_local --can-channel can1
 ```
+
+## Notes
+
+- **Joint limits**: The follower will stop tracking if the leader reaches a joint limit. Restart both processes to recover.
+- **Motor lights**: Blinking red = standby (normal before script starts). Solid green = active. If lights go red during teleop, a motor has faulted — power-cycle the arm.
+- **CAN channel is down**: If you see `fail to communicate with motor`, check `ip link show canX` — the interface may be DOWN. Bring it up with `sudo ip link set canX up type can bitrate 1000000`.
