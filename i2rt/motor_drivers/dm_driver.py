@@ -714,7 +714,14 @@ class DMChainCanInterface(MotorChain):
             return self.read_states(torques=torques)
 
     def get_same_bus_device_states(self) -> Any:
-        with self.same_bus_device_lock:
+        # Non-blocking: return the last cached value immediately rather than
+        # waiting for the control thread to finish an encoder read.
+        if self.same_bus_device_lock.acquire(blocking=False):
+            try:
+                return self.same_bus_device_states
+            finally:
+                self.same_bus_device_lock.release()
+        else:
             return self.same_bus_device_states
 
     def close(self) -> None:

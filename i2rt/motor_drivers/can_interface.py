@@ -19,6 +19,7 @@ class CanInterface:
     ):
         self.bus = can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
         self.busstate = self.bus.state
+        self.channel = channel
         self.name = name
         self.receive_mode = receive_mode
         self.use_buffered_reader = use_buffered_reader
@@ -46,20 +47,24 @@ class CanInterface:
         Returns:
             can.Message: The message that was sent.
         """
+        if expected_id is None:
+            expected_id = self.receive_mode.get_receive_id(motor_id)
         message = can.Message(arbitration_id=id, data=data, is_extended_id=False)
         for _ in range(max_retry):
             try:
-                # logging.info("Sending message: %s at %f", message, time.time())
                 self.bus.send(message)
-                response = self._receive_message(motor_id, timeout=0.01)
-                # logging.info("Received response: %s at %f", response, time.time())
-
-                if expected_id is None:
-                    expected_id = self.receive_mode.get_receive_id(motor_id)
-                if response and (expected_id == response.arbitration_id):
-                    return response
-                self.try_receive_message(id)
-            except (can.CanError, AssertionError) as e:
+                # Drain the bus for up to 50ms looking for the expected ID,
+                # skipping unrelated messages (e.g. motor responses on a shared bus).
+                deadline = time.time() + 0.05
+                while time.time() < deadline:
+                    remaining = deadline - time.time()
+                    response = self.bus.recv(timeout=max(remaining, 0.001))
+                    if response is None:
+                        break
+                    if response.arbitration_id == expected_id:
+                        return response
+                    # wrong ID — keep draining, don't resend
+            except can.CanError as e:
                 logging.warning(e)
                 logging.warning(
                     "\033[91m"
