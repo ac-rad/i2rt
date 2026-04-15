@@ -91,9 +91,15 @@ class YAMLeaderRobot:
         qpos = self._robot.get_observations()["joint_pos"]
         encoder_obs = self._motor_chain.get_same_bus_device_states()
         time.sleep(0.01)
-        gripper_cmd = 1 - encoder_obs[0].position
+        if encoder_obs is None:
+            # Encoder not yet read by control thread — default to open gripper, no buttons.
+            gripper_cmd = 1.0
+            io_inputs = [0, 0]
+        else:
+            gripper_cmd = 1 - encoder_obs[0].position
+            io_inputs = encoder_obs[0].io_inputs
         qpos_with_gripper = np.concatenate([qpos, [gripper_cmd]])
-        return qpos_with_gripper, encoder_obs[0].io_inputs
+        return qpos_with_gripper, io_inputs
 
     def command_joint_pos(self, joint_pos: np.ndarray) -> None:
         assert joint_pos.shape[0] == 6
@@ -155,32 +161,15 @@ def main(args: Args) -> None:
                 client_robot.command_joint_pos(follower_command_joint_pos)
                 time.sleep(0.03)
 
-        if use_teaching_handle:
-            synchronized = False
-        else:
-            # No teaching handle: start synchronized immediately after slow-moving
-            # the follower to match the leader.
-            print("No teaching handle: starting synchronized immediately.", flush=True)
-            slow_move(current_joint_pos)
-            synchronized = True
+        # Slow-move follower to match leader, then start synchronized immediately.
+        print("Syncing follower to leader position...", flush=True)
+        slow_move(current_joint_pos)
+        synchronized = True
+        print("Synchronized. Teleop active.", flush=True)
 
         while True:
             if use_teaching_handle:
                 current_joint_pos, current_button = robot.get_info()
-                print(f"button: {current_button}", flush=True)
-                if current_button[0] > 0.5:
-                    if not synchronized:
-                        robot.update_kp_kd(kp=robot_current_kp * args.bilateral_kp, kd=np.ones(6) * 0.0)
-                        robot.command_joint_pos(current_joint_pos[:6])
-                        slow_move(current_joint_pos)
-                    else:
-                        print("clear bilateral pd", flush=True)
-                        robot.update_kp_kd(kp=np.ones(6) * 0.0, kd=np.ones(6) * 0.0)
-                        robot.command_joint_pos(current_follower_joint_pos[:6])
-                    synchronized = not synchronized
-                    while current_button[0] > 0.5:
-                        time.sleep(0.03)
-                        current_joint_pos, current_button = robot.get_info()
             else:
                 current_joint_pos = robot.get_joint_pos()
 
@@ -188,10 +177,11 @@ def main(args: Args) -> None:
 
             if synchronized:
                 n = client_robot.num_dofs()
-                cmd = np.concatenate([current_joint_pos[:6], current_follower_joint_pos[6:n]])
+                # Use gripper from encoder (index 6) if available, else hold follower gripper.
+                gripper = current_joint_pos[6:7] if len(current_joint_pos) > 6 else current_follower_joint_pos[6:n]
+                cmd = np.concatenate([current_joint_pos[:6], gripper, current_follower_joint_pos[7:n]])
                 client_robot.command_joint_pos(cmd)
-                if use_teaching_handle:
-                    robot.command_joint_pos(current_follower_joint_pos[:6])
+                # bilateral feedback intentionally disabled — leader runs in gravity-comp only
 
             print(f"leader: {np.round(current_joint_pos[:6], 3)}", flush=True)
             time.sleep(0.01)

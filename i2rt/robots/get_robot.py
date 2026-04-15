@@ -54,7 +54,9 @@ def _load_joint_limits_from_xml(*xml_paths: str) -> np.ndarray:
 
 
 def get_encoder_chain(can_interface: CanInterface) -> EncoderChain:
-    passive_encoder_reader = PassiveEncoderReader(can_interface)
+    # Use a dedicated CAN bus for the encoder so it never contends with motor traffic.
+    encoder_interface = CanInterface(channel=can_interface.channel)
+    passive_encoder_reader = PassiveEncoderReader(encoder_interface)
     return EncoderChain([0x50E], passive_encoder_reader)
 
 
