@@ -32,15 +32,6 @@ python examples/minimum_gello/minimum_gello.py \
 
 The follower will slow-move to match the leader's starting position, then teleoperation begins immediately — no button press required. Squeeze the teaching handle to control the follower gripper.
 
-## Running Without Teaching Handle
-
-If you want to run the leader arm without the teaching handle (arm joints only, no gripper control):
-
-```bash
-python examples/minimum_gello/minimum_gello.py \
-    --gripper no_gripper --mode leader --can-channel can0
-```
-
 ## Options
 
 | Flag | Default | Description |
