@@ -141,7 +141,6 @@ class MotorChainRobot(Robot):
         self._gripper_index = gripper_index
         self.remapper = JointMapper({}, len(motor_chain))  # so it works without gripper
         self._gripper_limits = gripper_limits
-
         if self._gripper_index is not None:
             self._gripper_force_limiter = GripperForceLimiter(
                 max_force=limit_gripper_force, gripper_type=gripper_type, arm_type=arm_type, kp=kp[gripper_index]
@@ -321,6 +320,7 @@ class MotorChainRobot(Robot):
             g = self._compute_gravity_compensation(self._joint_state)
             motor_torques = joint_commands.torques + g * self.gravity_comp_factor
             motor_torques = np.clip(motor_torques, -self._clip_motor_torque, self._clip_motor_torque)
+
             self._last_motor_torques = motor_torques.copy()
 
             if self._gripper_index is not None:

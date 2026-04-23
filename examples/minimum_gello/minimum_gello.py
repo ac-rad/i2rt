@@ -152,14 +152,16 @@ def main(args: Args) -> None:
         print(f"Current leader joint pos: {current_joint_pos}", flush=True)
         print(f"Current follower joint pos: {current_follower_joint_pos}", flush=True)
 
-        def slow_move(joint_pos: np.ndarray, duration: float = 1.0) -> None:
+        def slow_move(joint_pos: np.ndarray, duration: float = 3.0) -> None:
+            dt = 0.01
+            steps = int(duration / dt)
             n = client_robot.num_dofs()
-            for i in range(100):
-                interp = joint_pos[:6] * i / 100 + current_follower_joint_pos[:6] * (1 - i / 100)
+            for i in range(steps):
+                interp = joint_pos[:6] * i / steps + current_follower_joint_pos[:6] * (1 - i / steps)
                 # Pad to follower DOF count, keeping gripper at its current position.
                 follower_command_joint_pos = np.concatenate([interp, current_follower_joint_pos[6:n]])
                 client_robot.command_joint_pos(follower_command_joint_pos)
-                time.sleep(0.03)
+                time.sleep(dt)
 
         # Slow-move follower to match leader, then start synchronized immediately.
         print("Syncing follower to leader position...", flush=True)
@@ -183,7 +185,9 @@ def main(args: Args) -> None:
                 client_robot.command_joint_pos(cmd)
                 # bilateral feedback intentionally disabled — leader runs in gravity-comp only
 
-            print(f"leader: {np.round(current_joint_pos[:6], 3)}", flush=True)
+            leader_state = robot._motor_chain.state if use_teaching_handle else robot.motor_chain.state
+            effort = np.round([s.torque for s in leader_state], 3) if leader_state else None
+            print(f"leader pos: {np.round(current_joint_pos[:6], 3)}  effort: {effort}", flush=True)
             time.sleep(0.01)
     elif "visualizer" in args.mode:
         if args.mode == "visualizer_remote":
