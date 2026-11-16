@@ -15,6 +15,7 @@ import mujoco
 import numpy as np
 
 from i2rt.robots.robot import Robot
+from i2rt.robots.utils import teaching_handle_trigger_id
 
 # Simulated motor temperatures (°C) — typical idle values for real hardware.
 _SIM_TEMP_MOS = 35.0
@@ -49,6 +50,8 @@ class SimRobot(Robot):
         gripper_index: Optional[int] = None,
         gripper_limits: Optional[np.ndarray] = None,
         initial_qpos: Optional[np.ndarray] = None,
+        gravity_comp_factor: Optional[np.ndarray] = None,
+        control_freq: float = 200.0,
     ) -> None:
         self.xml_path = xml_path
         self._n_dofs = n_dofs
@@ -69,6 +72,11 @@ class SimRobot(Robot):
             if jnt_lo != 0.0 or jnt_hi != 1.0:
                 self._gripper_qpos_range = (float(jnt_lo), float(jnt_hi))
 
+        # The teaching handle's trigger is a passive hinge named `gripper`, outside the
+        # commandable DOFs, so its angle never reaches _qpos. Track it here to report a
+        # normalized gripper_pos. -1 (so nothing is reported) on every other gripper.
+        self._handle_joint_id = teaching_handle_trigger_id(self._model)
+
         self._lock = threading.Lock()
         self._qpos = np.zeros(n_dofs) if initial_qpos is None else np.array(initial_qpos, dtype=float)
         self._qvel = np.zeros(n_dofs)
@@ -85,6 +93,18 @@ class SimRobot(Robot):
         self._joint_state: Optional[_SimJointState] = None
         self._update_joint_state()
 
+        self._gravity_comp_factor = gravity_comp_factor if gravity_comp_factor is not None else np.ones(n_dofs)
+        self._control_freq = control_freq
+        self._physics_active = False
+        # Two independent switches, because the viewer can ask for three regimes:
+        #   physics + gravity comp -> the arm holds its pose (the default)
+        #   physics + nothing      -> the arm falls, previewing a real chain commanded zero torque
+        #   no physics             -> frozen, so CONTROL mode can teleport qpos
+        self._grav_comp_enabled = True
+        self._zero_torque = False
+        self._stop_event = threading.Event()
+        self._physics_thread: Optional[threading.Thread] = None
+
     def _cmd_to_mj_qpos(self, cmd: np.ndarray) -> np.ndarray:
         """Map command-space positions to MuJoCo qpos.
 
@@ -96,6 +116,19 @@ class SimRobot(Robot):
             lo, hi = self._gripper_qpos_range
             mj[self._gripper_index] = lo + cmd[self._gripper_index] * (hi - lo)
         return mj
+
+    def _mj_to_cmd_qpos(self, mj: np.ndarray) -> np.ndarray:
+        """Map MuJoCo qpos back to command-space positions.
+
+        Reverse of ``_cmd_to_mj_qpos``.  For the gripper joint the physical
+        range is mapped back to [0, 1].
+        """
+        cmd = mj.copy()
+        if self._gripper_qpos_range is not None and self._gripper_index is not None:
+            lo, hi = self._gripper_qpos_range
+            if hi > lo:
+                cmd[self._gripper_index] = (mj[self._gripper_index] - lo) / (hi - lo)
+        return cmd
 
     # ---- simulated feedback --------------------------------------------------
 
@@ -135,6 +168,90 @@ class SimRobot(Robot):
             timestamp=time.time(),
         )
 
+    # ---- physics simulation --------------------------------------------------
+
+    def start_server(self) -> None:
+        """Start the gravity-compensation physics loop.
+
+        Once running, :meth:`_physics_loop` continuously applies gravity
+        compensation torques and steps MuJoCo physics.  Call
+        :meth:`enable_gravity_comp` / :meth:`disable_gravity_comp` to
+        toggle the physics on and off (e.g. when switching between VIS and
+        CONTROL modes in the viewer).
+        """
+        if self._physics_active:
+            return
+        self._physics_active = True
+        self._stop_event.clear()
+        self._physics_thread = threading.Thread(
+            target=self._physics_loop,
+            daemon=True,
+            name="sim_physics",
+        )
+        self._physics_thread.start()
+
+    def _physics_loop(self) -> None:
+        control_dt = 1.0 / self._control_freq
+        n_substeps = max(1, round(control_dt / self._model.opt.timestep))
+        nq = min(self._n_dofs, self._model.nq)
+        nq_arm = self._gripper_index if self._gripper_index is not None else nq
+
+        # Unactuated and fed by no encoder in sim, the teaching handle's trigger would fall to its
+        # stop under gravity; every step puts it back at rest (the open end of its range).
+        hid = self._handle_joint_id
+        if hid != -1:
+            trigger_qadr, trigger_dadr = self._model.jnt_qposadr[hid], self._model.jnt_dofadr[hid]
+            trigger_rest = self._model.jnt_range[hid][1]
+
+        next_time = time.time() + control_dt
+        while not self._stop_event.is_set():
+            with self._lock:
+                if self._grav_comp_enabled:
+                    self._data.qfrc_applied[:] = 0.0
+                    if not self._zero_torque:
+                        grav = self._compute_gravity_torques()
+                        grav[:nq_arm] *= self._gravity_comp_factor[:nq_arm]
+                        self._data.qfrc_applied[:nq_arm] = grav[:nq_arm]
+
+                    for _ in range(n_substeps):
+                        mujoco.mj_step(self._model, self._data)
+                        if hid != -1:
+                            self._data.qpos[trigger_qadr] = trigger_rest
+                            self._data.qvel[trigger_dadr] = 0.0
+
+                    raw = self._data.qpos[:nq].copy()
+                    self._qpos[:nq] = self._mj_to_cmd_qpos(raw)[:nq]
+                    self._qvel[:nq] = self._data.qvel[:nq]
+
+                self._update_joint_state()
+            sleep_time = next_time - time.time()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            next_time += control_dt
+
+    def enable_gravity_comp(self) -> None:
+        """Resume gravity-compensation physics from the current pose."""
+        with self._lock:
+            self._grav_comp_enabled = True
+            self._zero_torque = False
+
+    def disable_gravity_comp(self) -> None:
+        """Pause gravity-compensation physics (CONTROL mode uses teleport)."""
+        with self._lock:
+            self._grav_comp_enabled = False
+
+    def enter_zero_torque_idle(self) -> None:
+        """Keep stepping physics but apply nothing, so the arm falls under its own weight.
+
+        The sim counterpart of ``MotorChainRobot.enter_zero_torque_idle``. Physics keeps running --
+        unlike ``disable_gravity_comp``, which freezes it for CONTROL-mode teleport -- because the
+        point of this mode is to show what a real chain commanded zero torque actually does. A real
+        arm can be back-driven by hand from here; a simulated one has only gravity, so it falls.
+        """
+        with self._lock:
+            self._grav_comp_enabled = True
+            self._zero_torque = True
+
     # ---- Robot protocol ------------------------------------------------------
 
     def num_dofs(self) -> int:
@@ -149,6 +266,14 @@ class SimRobot(Robot):
             return {"pos": self._qpos.copy(), "vel": self._qvel.copy()}
 
     def command_joint_pos(self, joint_pos: np.ndarray) -> None:
+        """Command the sim robot to a target joint position.
+
+        When physics is active (sim mode), this disables gravity comp and
+        teleports ``data.qpos`` directly.  Gravity comp stays off for the
+        duration of control mode and is re-enabled when the caller (e.g.
+        ``MujocoControlInterface._on_key``) switches back to VIS mode via
+        ``enable_gravity_comp()``.
+        """
         pos = np.array(joint_pos, dtype=float)
         if self._joint_limits is not None:
             arm_end = self._gripper_index if self._gripper_index is not None else len(pos)
@@ -164,10 +289,13 @@ class SimRobot(Robot):
                 max(self._gripper_limits),
             )
         with self._lock:
+            if self._physics_active:
+                self._grav_comp_enabled = False
             self._qpos = pos
             n = min(len(pos), self._model.nq)
             mj_qpos = self._cmd_to_mj_qpos(pos)
             self._data.qpos[:n] = mj_qpos[:n]
+            self._data.qvel[:] = 0.0
             mujoco.mj_forward(self._model, self._data)
             self._update_joint_state()
 
@@ -181,16 +309,33 @@ class SimRobot(Robot):
         if "vel" in joint_state:
             self.command_target_vel(joint_state["vel"])
 
+    def _handle_gripper_pos(self) -> Optional[float]:
+        """Teaching-handle trigger angle as a normalized 0..1 gripper position.
+
+        Normalized the same way every gripper command is (0 = closed, 1 = open), so a
+        consumer reading ``gripper_pos`` cannot tell a squeezed trigger from a closed
+        motorized gripper.  None when the model has no such hinge.
+        """
+        if self._handle_joint_id == -1:
+            return None
+        lo, hi = self._model.jnt_range[self._handle_joint_id]
+        q = self._data.qpos[self._model.jnt_qposadr[self._handle_joint_id]]
+        return float(np.clip((q - lo) / (hi - lo), 0.0, 1.0))
+
     def get_observations(self) -> Dict[str, np.ndarray]:
         with self._lock:
             self._update_joint_state()
             eff = self._joint_state.eff
             if self._gripper_index is None:
-                return {
+                obs = {
                     "joint_pos": self._qpos.copy(),
                     "joint_vel": self._qvel.copy(),
                     "joint_eff": eff.copy(),
                 }
+                handle_pos = self._handle_gripper_pos()
+                if handle_pos is not None:
+                    obs["gripper_pos"] = np.array([handle_pos])
+                return obs
             else:
                 gi = self._gripper_index
                 return {
@@ -212,7 +357,12 @@ class SimRobot(Robot):
             "gripper_limits": self._gripper_limits,
             "gripper_index": self._gripper_index,
             "sim": True,
+            "gravity_comp_factor": self._gravity_comp_factor,
         }
 
     def close(self) -> None:
-        pass
+        if self._physics_active:
+            self._stop_event.set()
+            if self._physics_thread is not None:
+                self._physics_thread.join(timeout=2.0)
+            self._physics_active = False

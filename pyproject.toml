@@ -4,14 +4,16 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "i2rt"
-version = "0.0.1"
+version = "1.1.2"
 readme = "README.md"
 requires-python = ">=3.10"
 dynamic = ["description"]
 dependencies = [
     "click<8.2.0",
+    # crcmod-plus is a maintained fork that installs into the `crcmod` namespace, so code still does `import crcmod`.
+    "crcmod-plus>=2.3.1",
     "dm-env==1.6",
-    "evdev==1.9.2 ; sys_platform == 'linux'",
+    "mcap-ros2-support>=0.5.5",
     "mink>=0.0.13",
     "mujoco>=3.3.5",
     "numpy==2.2.6",
@@ -21,10 +23,17 @@ dependencies = [
     "python-can==4.5.0",
     "pyyaml>=6.0.0",
     "qpsolvers[quadprog]==4.7.1",
-    "ruckig==0.15.3",
+    "rerun-sdk>=0.32.2",
+    "ruckig>=0.19.4",
     "threadpoolctl==3.6.0",
-    "tyro==0.9.26",
+    "tyro>=1.0.0",
     "viser>=0.2.0",
+    # USB-to-GPIO converter for the linear-rail brake + limit switches on x86/non-Pi hosts.
+    "pyserial>=3.5",
+    # Raspberry Pi GPIO (linear-rail brake + limit switches). Pi-only via PEP 508 markers.
+    # rpi-lgpio is a drop-in for `from RPi import GPIO` that works on Pi 5 (BCM2712);
+    # legacy RPi.GPIO fails with "cannot determine peripheral soc base addr" on Pi 5.
+    "rpi-lgpio>=0.6; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'armv7l' or platform_machine == 'armv6l')",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +43,16 @@ dev = [
     "pytest-xdist>=3.8.0",
     "ruff>=0.15.6",
 ]
+
+[tool.uv]
+# `uv sync` also builds the EtherCAT transport (a compiled extension, Linux only). A group rather than
+# a dependency, so `pip install` / `uv pip install -e .` stay pure Python and never need a compiler.
+default-groups = ["dev", "ethercat"]
+
+[tool.uv.sources]
+# Non-editable: an editable scikit-build install points the package at this source tree while the
+# built library lands in site-packages.
+i2rt-ecat = { path = "i2rt-ecat", editable = false }
 
 [tool.flit.module]
 name = "i2rt"
@@ -106,3 +125,4 @@ dev = [
     "pytest-xdist>=3.8.0",
     "ruff>=0.15.6",
 ]
+ethercat = ["i2rt-ecat; sys_platform == 'linux'"]

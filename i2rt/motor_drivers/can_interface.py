@@ -6,6 +6,21 @@ import can
 
 from i2rt.motor_drivers.utils import ReceiveMode
 
+ETHERCAT_CHANNEL_PREFIX = "ecat:"
+
+
+def open_can_bus(channel: str, bustype: str = "socketcan", bitrate: int = 1000000) -> can.BusABC:
+    """A python-can bus on ``channel``.
+
+    ``ecat:<nic>`` (or ``ecat:<nic>:<slave>:<can channel>``) opens one through an EtherCAT-to-CAN
+    board on that NIC instead of a CAN adapter, so every CAN tool that takes a channel works there.
+    """
+    if channel.startswith(ETHERCAT_CHANNEL_PREFIX):
+        from i2rt.motor_drivers.ethercat_chain import EtherCATCanBus
+
+        return EtherCATCanBus(channel)
+    return can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
+
 
 class CanInterface:
     def __init__(
@@ -17,9 +32,9 @@ class CanInterface:
         receive_mode: ReceiveMode = ReceiveMode.p16,
         use_buffered_reader: bool = False,
     ):
-        self.bus = can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
-        self.busstate = self.bus.state
         self.channel = channel
+        self.bus = open_can_bus(channel, bustype, bitrate)
+        self.busstate = self.bus.state
         self.name = name
         self.receive_mode = receive_mode
         self.use_buffered_reader = use_buffered_reader
@@ -89,6 +104,26 @@ class CanInterface:
             return self._receive_message(motor_id, timeout, supress_warning=True)
         except AssertionError:
             return None
+
+    def _drain_bus(self, timeout_s: float = 0.05, idle_count: int = 10) -> int:
+        """Drain pending CAN frames until the bus is idle.
+
+        Loops `try_receive_message(timeout=0.001)` until either `idle_count`
+        consecutive 1 ms reads return None or `timeout_s` wall-clock has
+        elapsed. Used at init handovers (e.g. between encoder validation and
+        motor bring-up) to flush stale frames that would otherwise be misread
+        as the next motor's reply. Returns the number of frames consumed.
+        """
+        drained = 0
+        idle = 0
+        deadline = time.time() + timeout_s
+        while time.time() < deadline and idle < idle_count:
+            if self.try_receive_message(timeout=0.001) is None:
+                idle += 1
+            else:
+                idle = 0
+                drained += 1
+        return drained
 
     def _receive_message(
         self, motor_id: Optional[int] = None, timeout: float = 0.009, supress_warning: bool = False
