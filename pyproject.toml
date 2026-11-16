@@ -34,6 +34,7 @@ dependencies = [
     # rpi-lgpio is a drop-in for `from RPi import GPIO` that works on Pi 5 (BCM2712);
     # legacy RPi.GPIO fails with "cannot determine peripheral soc base addr" on Pi 5.
     "rpi-lgpio>=0.6; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'armv7l' or platform_machine == 'armv6l')",
+    "matplotlib>=3.10.9",
 ]
 
 [project.optional-dependencies]
