@@ -1,0 +1,3 @@
+# YAM Ultra follower arm: CANable 2 (gs_usb) adapter.
+# Pins this adapter to can0 and brings it up at 1 Mbit/s whenever it appears (boot or replug).
+SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", ATTRS{serial}=="0034004633354B0332333837", NAME="can0", RUN+="/usr/sbin/ip link set can0 type can bitrate 1000000", RUN+="/usr/sbin/ip link set can0 up"
